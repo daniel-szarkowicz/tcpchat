@@ -21,7 +21,11 @@ fn main() -> Result<()> {
     let mut server = Server::new((args.addr, args.port))?;
     loop {
         server.update()?;
-        std::thread::sleep(Duration::from_millis(10));
+        if server.inactivity != 0 {
+            let sleep_time = server.inactivity.min(25) * 10;
+            trace!("Server is inactive, sleeping for {}ms", sleep_time);
+            std::thread::sleep(Duration::from_millis(sleep_time));
+        }
     }
 }
 
@@ -29,6 +33,7 @@ struct Server {
     listener: TcpListener,
     clients: Vec<Client>,
     message_queue: Vec<String>,
+    inactivity: u64,
 }
 
 impl Server {
@@ -39,6 +44,7 @@ impl Server {
             listener,
             clients: Vec::default(),
             message_queue: Vec::default(),
+            inactivity: 0,
         };
         info!(
             "Server started with address {}",
@@ -48,6 +54,8 @@ impl Server {
     }
 
     fn update(&mut self) -> Result<()> {
+        self.inactivity += 1;
+        trace!("Updating server");
         while self.poll_listener()? {}
 
         for client in &mut self.clients {
@@ -55,15 +63,22 @@ impl Server {
                 .extend(std::iter::from_fn(|| client.poll()));
         }
 
-        for client in &mut self.clients {
-            for message in &self.message_queue {
-                client.send(message);
+        if !self.message_queue.is_empty() {
+            self.inactivity = 0;
+            for client in &mut self.clients {
+                for message in &self.message_queue {
+                    client.send(message);
+                }
+                client.flush();
             }
-            client.flush();
+            self.message_queue.clear();
         }
-        self.message_queue.clear();
 
+        let prev_clients_len = self.clients.len();
         self.clients.retain(Client::connected);
+        if self.clients.len() != prev_clients_len {
+            self.inactivity = 0;
+        }
 
         Ok(())
     }
@@ -71,6 +86,7 @@ impl Server {
     fn poll_listener(&mut self) -> Result<bool> {
         match self.listener.accept() {
             Ok((stream, _)) => {
+                self.inactivity = 0;
                 self.clients.push(Client::new(stream)?);
                 Ok(true)
             }
@@ -144,7 +160,7 @@ impl Client {
         if !self.connected {
             return;
         }
-        debug!("Disconnecting client {}", self.addr);
+        info!("Disconnecting client {}", self.addr);
         let _ = self.stream.shutdown(std::net::Shutdown::Both);
         self.connected = false;
     }
