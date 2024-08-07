@@ -1,91 +1,106 @@
-use std::io::{BufRead, BufReader, BufWriter, ErrorKind, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
-use std::thread::JoinHandle;
+use std::io::{BufRead, BufReader, BufWriter, ErrorKind, Result, Write};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-use anyhow::Result;
+fn main() -> Result<()> {
+    let mut server = Server::new("0.0.0.0:6969")?;
+    loop {
+        server.update()?;
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
 
-enum Message {
-    Text(String),
+struct Server {
+    listener: TcpListener,
+    clients: Vec<Client>,
+    message_queue: Vec<String>,
+}
+
+impl Server {
+    fn new<A: ToSocketAddrs>(addr: A) -> Result<Self> {
+        let listener = TcpListener::bind(addr)?;
+        listener.set_nonblocking(true)?;
+        Ok(Self {
+            listener,
+            clients: Vec::default(),
+            message_queue: Vec::default(),
+        })
+    }
+
+    fn update(&mut self) -> Result<()> {
+        while self.poll_listener()? {}
+
+        for client in &mut self.clients {
+            self.message_queue
+                .extend(std::iter::from_fn(|| client.poll()));
+        }
+
+        for client in &mut self.clients {
+            for message in &self.message_queue {
+                client.send(message);
+            }
+            client.flush();
+        }
+        self.message_queue.clear();
+
+        self.clients.retain(Client::connected);
+
+        Ok(())
+    }
+
+    fn poll_listener(&mut self) -> Result<bool> {
+        match self.listener.accept() {
+            Ok((stream, _)) => {
+                self.clients.push(Client::new(stream)?);
+                Ok(true)
+            }
+            Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 struct Client {
-    _addr: SocketAddr,
-    writer: BufWriter<TcpStream>,
     reader: BufReader<TcpStream>,
-    sender: Sender<Message>,
-    receiver: Receiver<Message>,
-    id: usize,
+    writer: BufWriter<TcpStream>,
+    connected: bool,
 }
 
-fn main() -> Result<()> {
-    println!("Server started!");
-    let listener = TcpListener::bind("0.0.0.0:6969")?;
+impl Client {
+    fn new(stream: TcpStream) -> Result<Self> {
+        stream.set_nonblocking(true)?;
+        Ok(Self {
+            reader: BufReader::new(stream.try_clone()?),
+            writer: BufWriter::new(stream),
+            connected: true,
+        })
+    }
 
-    let (server_sender, server_receiver) = channel();
-
-    let mut clients = vec![];
-    let mut client_id = 0;
-
-    listener.set_nonblocking(true)?;
-
-    loop {
-        match listener.accept() {
-            Ok((stream, _addr)) => {
-                println!("Handling client: {_addr}");
-                let (client_sender, client_receiver) = channel();
-                client_id += 1;
-                stream.set_nonblocking(true)?;
-                let client = Client {
-                    _addr,
-                    sender: client_sender,
-                    id: client_id,
-                    reader: BufReader::new(stream.try_clone()?),
-                    writer: BufWriter::new(stream),
-                    receiver: client_receiver,
-                };
-                clients.push(client);
-            }
-            Err(e) => {
-                if e.kind() != ErrorKind::WouldBlock {
-                    Err(e)?
-                }
+    fn poll(&mut self) -> Option<String> {
+        let mut line = String::new();
+        match self.reader.read_line(&mut line) {
+            Ok(1..) => Some(line),
+            Err(e) if e.kind() == ErrorKind::WouldBlock => None,
+            _ => {
+                self.connected = false;
+                None
             }
         }
-        match server_receiver.try_recv() {
-            Ok(Message::Text(t)) => {
-                for client in &clients {
-                    client.sender.send(Message::Text(t.clone()))?;
-                }
-            }
-            Err(TryRecvError::Disconnected) => Err(TryRecvError::Disconnected)?,
-            Err(TryRecvError::Empty) => {}
+    }
+
+    fn send(&mut self, message: &str) {
+        if self.writer.write_all(message.as_bytes()).is_err() {
+            self.connected = false;
         }
-        for client in &mut clients {
-            client.writer.flush()?;
-            while {
-                let mut line = format!("#{}: ", client.id);
-                match client.reader.read_line(&mut line) {
-                    Ok(0) => return Ok(()),
-                    Ok(_) => {
-                        println!("read line: '{}'", line);
-                        server_sender.send(Message::Text(line))?;
-                        true
-                    }
-                    Err(e) => {
-                        if e.kind() != ErrorKind::WouldBlock {
-                            Err(e)?;
-                        }
-                        false
-                    }
-                }
-            } {}
-            if let Ok(Message::Text(message)) = client.receiver.try_recv() {
-                println!("sending message: '{}'", message);
-                write!(client.writer, "{}", message)?;
-            }
+    }
+
+    fn flush(&mut self) {
+        if self.writer.flush().is_err() {
+            self.connected = false;
         }
-        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    const fn connected(&self) -> bool {
+        self.connected
     }
 }
