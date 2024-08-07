@@ -12,8 +12,10 @@ enum Message {
 
 struct Client {
     _addr: SocketAddr,
+    writer: BufWriter<TcpStream>,
+    reader: BufReader<TcpStream>,
     sender: Sender<Message>,
-    _handle: JoinHandle<()>,
+    receiver: Receiver<Message>,
     id: usize,
 }
 
@@ -34,16 +36,14 @@ fn main() -> Result<()> {
                 println!("Handling client: {_addr}");
                 let (client_sender, client_receiver) = channel();
                 client_id += 1;
+                stream.set_nonblocking(true)?;
                 let client = Client {
                     _addr,
                     sender: client_sender,
-                    _handle: handle_client(
-                        stream,
-                        server_sender.clone(),
-                        client_receiver,
-                        client_id,
-                    ),
                     id: client_id,
+                    reader: BufReader::new(stream.try_clone()?),
+                    writer: BufWriter::new(stream),
+                    receiver: client_receiver,
                 };
                 clients.push(client);
             }
@@ -62,26 +62,11 @@ fn main() -> Result<()> {
             Err(TryRecvError::Disconnected) => Err(TryRecvError::Disconnected)?,
             Err(TryRecvError::Empty) => {}
         }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
-fn handle_client(
-    stream: TcpStream,
-    server_sender: Sender<Message>,
-    client_receiver: Receiver<Message>,
-    client_id: usize,
-) -> JoinHandle<()> {
-    let thread = move || -> Result<()> {
-        stream.set_nonblocking(true)?;
-        let mut reader = BufReader::new(stream.try_clone()?);
-        let mut writer = BufWriter::new(stream);
-        writeln!(writer, "Hello from the server!")?;
-        loop {
-            writer.flush()?;
+        for client in &mut clients {
+            client.writer.flush()?;
             while {
-                let mut line = format!("#{client_id}: ");
-                match reader.read_line(&mut line) {
+                let mut line = format!("#{}: ", client.id);
+                match client.reader.read_line(&mut line) {
                     Ok(0) => return Ok(()),
                     Ok(_) => {
                         println!("read line: '{}'", line);
@@ -96,18 +81,11 @@ fn handle_client(
                     }
                 }
             } {}
-            if let Ok(Message::Text(message)) = client_receiver.try_recv() {
+            if let Ok(Message::Text(message)) = client.receiver.try_recv() {
                 println!("sending message: '{}'", message);
-                write!(writer, "{}", message)?;
+                write!(client.writer, "{}", message)?;
             }
-            std::thread::sleep(Duration::from_millis(10));
         }
-    };
-    std::thread::spawn(move || {
-        if let Err(e) = thread() {
-            println!("Client exited with error: {}", e);
-        } else {
-            println!("Client exited");
-        }
-    })
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
