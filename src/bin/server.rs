@@ -1,8 +1,8 @@
 use std::io::{BufRead, BufReader, BufWriter, ErrorKind, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use anyhow::Result;
 
@@ -23,44 +23,47 @@ fn main() -> Result<()> {
 
     let (server_sender, server_receiver) = channel();
 
-    let clients = Arc::new(Mutex::new(vec![]));
+    let mut clients = vec![];
     let mut client_id = 0;
 
-    let _server_handle = handle_server(server_receiver, clients.clone());
+    listener.set_nonblocking(true)?;
 
     loop {
-        let (stream, _addr) = listener.accept()?;
-        println!("Handling client: {_addr}");
-        let (client_sender, client_receiver) = channel();
-        client_id += 1;
-        let client = Client {
-            _addr,
-            sender: client_sender,
-            _handle: handle_client(
-                stream,
-                server_sender.clone(),
-                client_receiver,
-                client_id,
-            ),
-            id: client_id,
-        };
-        clients.lock().unwrap().push(client);
-    }
-}
-
-fn handle_server(
-    receiver: Receiver<Message>,
-    clients: Arc<Mutex<Vec<Client>>>,
-) -> std::thread::JoinHandle<Result<()>> {
-    std::thread::spawn(move || loop {
-        match receiver.recv()? {
-            Message::Text(t) => {
-                for client in &*clients.lock().unwrap() {
-                    client.sender.send(Message::Text(t.clone()))?;
+        match listener.accept() {
+            Ok((stream, _addr)) => {
+                println!("Handling client: {_addr}");
+                let (client_sender, client_receiver) = channel();
+                client_id += 1;
+                let client = Client {
+                    _addr,
+                    sender: client_sender,
+                    _handle: handle_client(
+                        stream,
+                        server_sender.clone(),
+                        client_receiver,
+                        client_id,
+                    ),
+                    id: client_id,
+                };
+                clients.push(client);
+            }
+            Err(e) => {
+                if e.kind() != ErrorKind::WouldBlock {
+                    Err(e)?
                 }
             }
         }
-    })
+        match server_receiver.try_recv() {
+            Ok(Message::Text(t)) => {
+                for client in &clients {
+                    client.sender.send(Message::Text(t.clone()))?;
+                }
+            }
+            Err(TryRecvError::Disconnected) => Err(TryRecvError::Disconnected)?,
+            Err(TryRecvError::Empty) => {}
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn handle_client(
@@ -97,6 +100,7 @@ fn handle_client(
                 println!("sending message: '{}'", message);
                 write!(writer, "{}", message)?;
             }
+            std::thread::sleep(Duration::from_millis(10));
         }
     };
     std::thread::spawn(move || {
