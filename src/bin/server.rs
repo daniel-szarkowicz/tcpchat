@@ -1,8 +1,8 @@
-use std::io::{BufRead, BufReader, BufWriter, ErrorKind, Result, Write};
+use std::io::{BufRead, BufReader, BufWriter, Error, ErrorKind, Result, Write};
 use std::net::{
     IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 use log::{debug, info, trace};
@@ -54,31 +54,54 @@ impl Server {
     }
 
     fn update(&mut self) -> Result<()> {
+        let tick_start = Instant::now();
         self.inactivity += 1;
         trace!("Updating server");
-        while self.poll_listener()? {}
 
-        for client in &mut self.clients {
-            self.message_queue
-                .extend(std::iter::from_fn(|| client.poll()));
-        }
+        let listener_poll_start = Instant::now();
+        self.poll_listener()?;
+        let listener_poll_millis = listener_poll_start.elapsed().as_millis();
 
+        let client_poll_start = Instant::now();
+        self.message_queue
+            .extend(self.clients.iter_mut().filter_map(Client::poll));
+        let client_poll_millis = client_poll_start.elapsed().as_millis();
+
+        let message_send_start = Instant::now();
         if !self.message_queue.is_empty() {
+            let message_batch = self.message_queue.join("");
             self.inactivity = 0;
             for client in &mut self.clients {
-                for message in &self.message_queue {
-                    client.send(message);
-                }
+                client.send(&message_batch);
                 client.flush();
             }
             self.message_queue.clear();
         }
+        let message_send_millis = message_send_start.elapsed().as_millis();
 
+        let client_clear_start = Instant::now();
         let prev_clients_len = self.clients.len();
         self.clients.retain(Client::connected);
         if self.clients.len() != prev_clients_len {
             self.inactivity = 0;
         }
+        let client_clear_millis = client_clear_start.elapsed().as_millis();
+
+        let tick_millis = tick_start.elapsed().as_millis();
+        log::log!(
+            match tick_millis {
+                20.. => log::Level::Warn,
+                10.. => log::Level::Info,
+                5.. => log::Level::Debug,
+                _ => log::Level::Trace,
+            },
+            "Server tick took {}ms, (lp {}, cp {}, ms {}, cc {})",
+            tick_millis,
+            listener_poll_millis,
+            client_poll_millis,
+            message_send_millis,
+            client_clear_millis,
+        );
 
         Ok(())
     }
@@ -91,6 +114,7 @@ impl Server {
                 Ok(true)
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(false),
+            // HACK: this error might not be fatal
             Err(e) => Err(e),
         }
     }
@@ -129,8 +153,15 @@ impl Client {
                 Some(line)
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => None,
-            _ => {
-                self.disconnect();
+            Err(e) => {
+                self.disconnect(Some(e));
+                None
+            }
+            Ok(0) => {
+                self.disconnect(Some(Error::new(
+                    ErrorKind::ConnectionAborted,
+                    "Read 0 bytes from client",
+                )));
                 None
             }
         }
@@ -140,9 +171,11 @@ impl Client {
         if !self.connected {
             return;
         }
-        debug!("Sending message '{}' to {}", message.trim(), self.addr);
-        if self.writer.write_all(message.as_bytes()).is_err() {
-            self.disconnect();
+        trace!("Sending message '{}' to {}", message.trim(), self.addr);
+        match self.writer.write_all(message.as_bytes()) {
+            Ok(()) => (),
+            Err(e) if e.kind() == ErrorKind::WouldBlock => (),
+            Err(e) => self.disconnect(Some(e)),
         }
     }
 
@@ -151,16 +184,27 @@ impl Client {
             return;
         }
         trace!("Flushing messages to {}", self.addr);
-        if self.writer.flush().is_err() {
-            self.disconnect();
+        match self.writer.flush() {
+            Ok(()) => (),
+            Err(e) if e.kind() == ErrorKind::WouldBlock => (),
+            Err(e) => self.disconnect(Some(e)),
         }
     }
 
-    fn disconnect(&mut self) {
+    fn disconnect(&mut self, reason: Option<Error>) {
         if !self.connected {
             return;
         }
-        info!("Disconnecting client {}", self.addr);
+        if let Some(e) = reason {
+            info!(
+                "Disconnecting client {}, error kind: {}, reason: {}",
+                self.addr,
+                e.kind(),
+                e
+            );
+        } else {
+            info!("Disconnecting client {}, no reason", self.addr);
+        }
         let _ = self.stream.shutdown(std::net::Shutdown::Both);
         self.connected = false;
     }
