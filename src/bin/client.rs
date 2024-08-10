@@ -14,6 +14,8 @@ use log::{error, info};
 use chat::client::channel_logger;
 use chat::server::Client;
 
+const EXIT_KEY: KeyCode = KeyCode::Esc;
+
 fn main() -> Result<()> {
     let log_receiver = channel_logger::init_and_get_receiver();
     let mut ui = UI::new()?;
@@ -25,7 +27,7 @@ fn main() -> Result<()> {
             ui.add_message(msg);
         }
         while let Ok(log) = log_receiver.try_recv() {
-            ui.add_message(log.to_string());
+            ui.add_log(log);
         }
         while let Some(event) = ui.poll()? {
             match event {
@@ -47,7 +49,7 @@ fn main() -> Result<()> {
 
 struct UI {
     stdout: StdoutLock<'static>,
-    messages: Vec<String>,
+    messages: Vec<Vec<(Color, String)>>,
     typing_buffer: String,
     width: u16,
     height: u16,
@@ -58,7 +60,10 @@ impl UI {
     fn new() -> Result<Self> {
         let mut this = Self {
             stdout: stdout().lock(),
-            messages: vec!["Press Esc to exit".to_owned()],
+            messages: vec![vec![(
+                Color::DarkGrey,
+                format!("Press {EXIT_KEY} to exit"),
+            )]],
             typing_buffer: String::new(),
             width: 0,
             height: 0,
@@ -86,7 +91,12 @@ impl UI {
         {
             self.stdout
                 .queue(MoveTo(0, self.height - 3 - (offset as u16)))?;
-            write!(self.stdout, "{index}> {message}")?;
+            self.stdout.queue(SetForegroundColor(Color::DarkGrey))?;
+            write!(self.stdout, "{index}> ")?;
+            for (color, text) in message {
+                self.stdout.queue(SetForegroundColor(*color))?;
+                write!(self.stdout, "{text}")?;
+            }
         }
 
         self.stdout.queue(MoveTo(0, self.height - 2))?;
@@ -122,7 +132,7 @@ impl UI {
 
     fn handle_key(&mut self, key_event: KeyEvent) -> Option<UIEvent> {
         match key_event.code {
-            KeyCode::Esc => Some(UIEvent::Exit),
+            EXIT_KEY => Some(UIEvent::Exit),
             KeyCode::Backspace => {
                 self.mark_dirty();
                 self.typing_buffer.pop();
@@ -150,7 +160,24 @@ impl UI {
 
     fn add_message(&mut self, message: String) {
         self.mark_dirty();
-        self.messages.push(message);
+        self.messages.push(vec![(Color::Reset, message)]);
+    }
+
+    fn add_log(&mut self, log: channel_logger::LogEntry) {
+        self.mark_dirty();
+        self.messages.push(vec![
+            (
+                match log.level {
+                    log::Level::Error => Color::Red,
+                    log::Level::Warn => Color::DarkYellow,
+                    log::Level::Info => Color::Green,
+                    log::Level::Debug => Color::Blue,
+                    log::Level::Trace => Color::Yellow,
+                },
+                format!("{}: ", log.level),
+            ),
+            (Color::Reset, log.message),
+        ]);
     }
 
     fn poll(&mut self) -> Result<Option<UIEvent>> {
