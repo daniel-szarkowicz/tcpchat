@@ -1,6 +1,5 @@
 use std::io::{stdout, Result, StdoutLock, Write};
 use std::net::TcpStream;
-use std::sync::mpsc::TryRecvError;
 use std::time::Duration;
 
 use crossterm::cursor::MoveTo;
@@ -22,22 +21,19 @@ fn main() -> Result<()> {
     let mut client = Client::new(TcpStream::connect("localhost:6969")?)?;
 
     while run {
-        if let Some(msg) = client.poll() {
+        while let Some(msg) = client.poll() {
             ui.add_message(msg);
         }
-        match log_receiver.try_recv() {
-            Ok(log) => ui.add_message(log.to_string()),
-            Err(TryRecvError::Empty) => (),
-            Err(TryRecvError::Disconnected) => {
-                ui.add_message("ERROR: logging just died".to_owned());
-            }
+        while let Ok(log) = log_receiver.try_recv() {
+            ui.add_message(log.to_string());
         }
-        match ui.poll()? {
-            UIEvent::Nothing => (),
-            UIEvent::Exit => run = false,
-            UIEvent::Message(msg) => {
-                client.send(&msg);
-                client.flush();
+        while let Some(event) = ui.poll()? {
+            match event {
+                UIEvent::Exit => run = false,
+                UIEvent::Message(msg) => {
+                    client.send(&msg);
+                    client.flush();
+                }
             }
         }
         ui.render()?;
@@ -46,7 +42,6 @@ fn main() -> Result<()> {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    drop(log_receiver);
     Ok(())
 }
 
@@ -125,29 +120,31 @@ impl UI {
         self.dirty = true;
     }
 
-    fn handle_key(&mut self, key_event: KeyEvent) -> UIEvent {
+    fn handle_key(&mut self, key_event: KeyEvent) -> Option<UIEvent> {
         match key_event.code {
-            KeyCode::Esc => UIEvent::Exit,
+            KeyCode::Esc => Some(UIEvent::Exit),
             KeyCode::Backspace => {
                 self.mark_dirty();
                 self.typing_buffer.pop();
-                UIEvent::Nothing
+                None
             }
             KeyCode::Enter => {
                 if self.typing_buffer.is_empty() {
-                    UIEvent::Nothing
+                    None
                 } else {
                     self.mark_dirty();
                     self.typing_buffer.push('\n');
-                    UIEvent::Message(std::mem::take(&mut self.typing_buffer))
+                    Some(UIEvent::Message(std::mem::take(
+                        &mut self.typing_buffer,
+                    )))
                 }
             }
             KeyCode::Char(c) => {
                 self.typing_buffer.push(c);
                 self.mark_dirty();
-                UIEvent::Nothing
+                None
             }
-            _ => UIEvent::Nothing,
+            _ => None,
         }
     }
 
@@ -156,19 +153,19 @@ impl UI {
         self.messages.push(message);
     }
 
-    fn poll(&mut self) -> Result<UIEvent> {
+    fn poll(&mut self) -> Result<Option<UIEvent>> {
         Ok(if event::poll(Duration::ZERO)? {
             match event::read()? {
                 Event::Key(event) => self.handle_key(event),
                 Event::Resize(w, h) => {
                     (self.width, self.height) = (w, h);
                     self.mark_dirty();
-                    UIEvent::Nothing
+                    None
                 }
-                _ => UIEvent::Nothing,
+                _ => None,
             }
         } else {
-            UIEvent::Nothing
+            None
         })
     }
 }
@@ -187,7 +184,6 @@ impl Drop for UI {
 }
 
 enum UIEvent {
-    Nothing,
     Exit,
     Message(String),
 }
