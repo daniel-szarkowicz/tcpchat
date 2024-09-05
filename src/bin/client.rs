@@ -2,6 +2,7 @@ use std::io::{stdout, Result, StdoutLock, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
+use chat::common::commands::{ClientCommand, ServerCommand};
 use crossterm::cursor::MoveTo;
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use crossterm::style::{Color, SetForegroundColor};
@@ -9,10 +10,10 @@ use crossterm::terminal::{
     self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::{ExecutableCommand, QueueableCommand};
-use log::{error, info};
+use log::error;
 
 use chat::client::channel_logger;
-use chat::server::Client;
+use chat::client::Server;
 
 const EXIT_KEY: KeyCode = KeyCode::Esc;
 
@@ -20,10 +21,10 @@ fn main() -> Result<()> {
     let log_receiver = channel_logger::init_and_get_receiver();
     let mut ui = UI::new()?;
     let mut run = true;
-    let mut client = Client::new(TcpStream::connect("localhost:6969")?)?;
+    let mut server = Server::new(TcpStream::connect("localhost:6969")?)?;
 
     while run {
-        while let Some(msg) = client.poll() {
+        while let Some(msg) = server.poll() {
             ui.add_message(msg);
         }
         while let Ok(log) = log_receiver.try_recv() {
@@ -33,13 +34,13 @@ fn main() -> Result<()> {
             match event {
                 UIEvent::Exit => run = false,
                 UIEvent::Message(msg) => {
-                    client.send(&msg);
-                    client.flush();
+                    server.send(&ClientCommand::Message { message: msg });
+                    server.flush();
                 }
             }
         }
         ui.render()?;
-        if !client.connected() {
+        if !server.connected() {
             run = false;
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -158,9 +159,28 @@ impl UI {
         }
     }
 
-    fn add_message(&mut self, message: String) {
+    fn add_message(&mut self, message: ServerCommand) {
         self.mark_dirty();
-        self.messages.push(vec![(Color::Reset, message)]);
+        match message {
+            ServerCommand::Padding => (),
+            ServerCommand::AddUser { user_id, name } => {
+                self.messages.push(vec![
+                    (Color::Blue, format!("User Connected {user_id}")),
+                    (Color::White, name),
+                ]);
+            }
+            ServerCommand::RemoveUser { user_id } => {
+                self.messages.push(vec![(
+                    Color::Blue,
+                    format!("User Disconnected {user_id}"),
+                )]);
+            }
+            ServerCommand::Message {
+                msg_id: _,
+                user_id: _,
+                message,
+            } => self.messages.push(vec![(Color::Reset, message)]),
+        }
     }
 
     fn add_log(&mut self, log: channel_logger::LogEntry) {
