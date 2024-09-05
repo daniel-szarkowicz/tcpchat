@@ -1,31 +1,27 @@
-[package]
-name = "chat"
-version = "0.1.0"
-edition = "2021"
-default-run = "server"
+[workspace]
+resolver = "2"
+members = [
+  "client",
+  "server",
+  "common"
+]
 
-[lints.rust]
-missing_debug_implementations = "warn"
-trivial_casts = "warn"
-trivial_numeric_casts = "warn"
-unit_bindings = "warn"
-unreachable_pub = "warn"
-unsafe_op_in_unsafe_fn = "deny"
-unused_extern_crates = "warn"
-unused_import_braces = "warn"
-unused_lifetimes = "warn"
-unused_macro_rules = "warn"
-unused_qualifications = "warn"
-variant_size_differences = "warn"
+# [lints.rust]
+# missing_debug_implementations = "warn"
+# trivial_casts = "warn"
+# trivial_numeric_casts = "warn"
+# unit_bindings = "warn"
+# unreachable_pub = "warn"
+# unsafe_op_in_unsafe_fn = "deny"
+# unused_extern_crates = "warn"
+# unused_import_braces = "warn"
+# unused_lifetimes = "warn"
+# unused_macro_rules = "warn"
+# unused_qualifications = "warn"
+# variant_size_differences = "warn"
 
-[lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }
-missing_errors_doc = "allow"
-module_inception = "allow"
-
-[dependencies]
-clap = { version = "4.5.13", features = ["derive"] }
-crossterm = "0.28.1"
-log = "0.4.22"
-pretty_env_logger = "0.5.0"
+# [lints.clippy]
+# pedantic = { level = "warn", priority = -1 }
+# nursery = { level = "warn", priority = -1 }
+# missing_errors_doc = "allow"
+# module_inception = "allow"

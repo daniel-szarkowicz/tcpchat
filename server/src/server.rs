@@ -4,8 +4,8 @@ use std::time::Instant;
 
 use log::{info, trace};
 
-use crate::common::commands::{ClientCommand, ServerCommand};
-use crate::server::Client;
+use crate::Client;
+use common::commands::{ClientCommand, ServerCommand};
 
 #[derive(Debug)]
 pub struct Server {

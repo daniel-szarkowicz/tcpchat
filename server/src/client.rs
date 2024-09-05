@@ -3,28 +3,28 @@ use std::net::{SocketAddr, TcpStream};
 
 use log::{debug, info, trace};
 
-use crate::common::commands::{ClientCommand, ServerCommand};
-use crate::common::Connection;
+use common::commands::{ClientCommand, ServerCommand};
+use common::Connection;
 
 #[derive(Debug)]
-pub struct Server {
+pub struct Client {
     addr: SocketAddr,
-    connection: Connection<ClientCommand, ServerCommand>,
+    connection: Connection<ServerCommand, ClientCommand>,
     connected: bool,
 }
 
-impl Server {
+impl Client {
     pub fn new(stream: TcpStream) -> Result<Self> {
         let this = Self {
             addr: stream.peer_addr()?,
             connection: Connection::new(stream)?,
             connected: true,
         };
-        info!("Server connected: {}", this.addr);
+        info!("Client connected: {}", this.addr);
         Ok(this)
     }
 
-    pub fn poll(&mut self) -> Option<ServerCommand> {
+    pub fn poll(&mut self) -> Option<ClientCommand> {
         if !self.connected {
             return None;
         }
@@ -41,7 +41,7 @@ impl Server {
         }
     }
 
-    pub fn send(&mut self, message: &ClientCommand) {
+    pub fn send(&mut self, message: &ServerCommand) {
         if !self.connected {
             return;
         }
@@ -71,13 +71,13 @@ impl Server {
         }
         if let Some(e) = reason {
             info!(
-                "Disconnecting server {}, error kind: {}, reason: {}",
+                "Disconnecting client {}, error kind: {}, reason: {}",
                 self.addr,
                 e.kind(),
                 e
             );
         } else {
-            info!("Disconnecting server {}, no reason", self.addr);
+            info!("Disconnecting client {}, no reason", self.addr);
         }
         let _ = self.connection.shutdown(std::net::Shutdown::Both);
         self.connected = false;

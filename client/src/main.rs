@@ -2,7 +2,7 @@ use std::io::{stdout, Result, StdoutLock, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-use chat::common::commands::{ClientCommand, ServerCommand};
+use common::commands::{ClientCommand, ServerCommand};
 use crossterm::cursor::MoveTo;
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use crossterm::style::{Color, SetForegroundColor};
@@ -12,8 +12,8 @@ use crossterm::terminal::{
 use crossterm::{ExecutableCommand, QueueableCommand};
 use log::error;
 
-use chat::client::channel_logger;
-use chat::client::Server;
+use client::channel_logger;
+use client::Server;
 
 const EXIT_KEY: KeyCode = KeyCode::Esc;
 

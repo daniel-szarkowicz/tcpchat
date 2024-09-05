@@ -5,7 +5,7 @@ use std::time::Duration;
 use clap::Parser;
 use log::trace;
 
-use chat::server::Server;
+use server::Server;
 
 #[derive(Parser, Debug)]
 struct Args {
