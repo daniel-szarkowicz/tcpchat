@@ -11,15 +11,18 @@ pub struct Connection<Sent: Codec + ?Sized, Received: Codec + ?Sized> {
     _sent: PhantomData<Sent>,
     _received: PhantomData<Received>,
 
-    read_buffer: Vec<u8>,
+    read_buffer: Cursor<Vec<u8>>,
     read_buffer_actual: usize,
     read_mode: ReadMode,
 }
+
+type DataSize = u16;
 
 #[derive(Debug)]
 enum ReadMode {
     Size,
     Data,
+    Parse,
 }
 
 impl<Sent: Codec + ?Sized, Received: Codec + ?Sized>
@@ -32,43 +35,64 @@ impl<Sent: Codec + ?Sized, Received: Codec + ?Sized>
             _sent: PhantomData,
             _received: PhantomData,
 
-            read_buffer: vec![0; size_of::<u16>()],
+            read_buffer: Cursor::new(vec![]),
             read_buffer_actual: 0,
-            read_mode: ReadMode::Size,
+            read_mode: ReadMode::Parse,
         })
     }
 
     pub fn receive(&mut self) -> Result<Received::Owned> {
-        let n = self
-            .stream
-            .read(&mut self.read_buffer[self.read_buffer_actual..])?;
-        if n == 0 {
-            return Err(Error::from(ErrorKind::UnexpectedEof));
-        }
-        self.read_buffer_actual += n;
-        if self.read_buffer_actual == self.read_buffer.len() {
+        loop {
             match self.read_mode {
                 ReadMode::Size => {
-                    let data_size =
-                        u16::decode(&mut Cursor::new(&mut self.read_buffer))
-                            .unwrap_or_else(|_| unreachable!());
-                    self.read_buffer.resize(data_size as usize, 0);
-                    self.read_buffer_actual = 0;
+                    self.fill_buf()?;
+                    let data_size = DataSize::decode(&mut self.read_buffer)
+                        .unwrap_or_else(|_| {
+                            unreachable!(
+                                "len: {}\npos: {}",
+                                self.read_buffer.get_ref().len(),
+                                self.read_buffer.position(),
+                            )
+                        });
+                    self.resize_buf(data_size as usize);
                     self.read_mode = ReadMode::Data;
-                    self.receive()
                 }
                 ReadMode::Data => {
-                    let result = Received::decode(&mut Cursor::new(
-                        &mut self.read_buffer,
-                    ));
-                    self.read_buffer.resize(2, 0);
-                    self.read_buffer_actual = 0;
+                    self.fill_buf()?;
+                    self.read_mode = ReadMode::Parse;
+                }
+                ReadMode::Parse => {
+                    if (self.read_buffer.position() as usize)
+                        < self.read_buffer.get_ref().len()
+                    {
+                        return Received::decode(&mut self.read_buffer);
+                    }
+                    self.resize_buf(size_of::<DataSize>());
                     self.read_mode = ReadMode::Size;
-                    result
                 }
             }
+        }
+    }
+
+    fn resize_buf(&mut self, size: usize) {
+        self.read_buffer.get_mut().resize(size, 0);
+        self.read_buffer.set_position(0);
+        self.read_buffer_actual = 0;
+    }
+
+    fn fill_buf(&mut self) -> Result<()> {
+        let n = self
+            .stream
+            .read(&mut self.read_buffer.get_mut()[self.read_buffer_actual..])?;
+        if n == 0 {
+            Err(Error::from(ErrorKind::UnexpectedEof))
         } else {
-            Err(Error::from(ErrorKind::WouldBlock))
+            self.read_buffer_actual += n;
+            if self.read_buffer_actual == self.read_buffer.get_ref().len() {
+                Ok(())
+            } else {
+                Err(Error::from(ErrorKind::WouldBlock))
+            }
         }
     }
 
