@@ -1,7 +1,9 @@
-use std::io::{Cursor, Error, ErrorKind, Read, Result, Write};
+use std::io::{Result, Write};
 use std::marker::PhantomData;
 use std::net::TcpStream;
 use std::ops::{Deref, DerefMut};
+
+use crate::Buffer;
 
 use super::Codec;
 
@@ -11,8 +13,7 @@ pub struct Connection<Sent: Codec + ?Sized, Received: Codec + ?Sized> {
     _sent: PhantomData<Sent>,
     _received: PhantomData<Received>,
 
-    read_buffer: Cursor<Vec<u8>>,
-    read_buffer_actual: usize,
+    buffer: Buffer,
     read_mode: ReadMode,
 }
 
@@ -35,8 +36,7 @@ impl<Sent: Codec + ?Sized, Received: Codec + ?Sized>
             _sent: PhantomData,
             _received: PhantomData,
 
-            read_buffer: Cursor::new(vec![]),
-            read_buffer_actual: 0,
+            buffer: Buffer::new(),
             read_mode: ReadMode::Parse,
         })
     }
@@ -45,53 +45,23 @@ impl<Sent: Codec + ?Sized, Received: Codec + ?Sized>
         loop {
             match self.read_mode {
                 ReadMode::Size => {
-                    self.fill_buf()?;
-                    let data_size = DataSize::decode(&mut self.read_buffer)
-                        .unwrap_or_else(|_| {
-                            unreachable!(
-                                "len: {}\npos: {}",
-                                self.read_buffer.get_ref().len(),
-                                self.read_buffer.position(),
-                            )
-                        });
-                    self.resize_buf(data_size as usize);
+                    self.buffer.try_fill_from(&mut self.stream)?;
+                    let data_size = DataSize::decode(&mut self.buffer)
+                        .unwrap_or_else(|_| unreachable!());
+                    self.buffer.resize(data_size as usize);
                     self.read_mode = ReadMode::Data;
                 }
                 ReadMode::Data => {
-                    self.fill_buf()?;
+                    self.buffer.try_fill_from(&mut self.stream)?;
                     self.read_mode = ReadMode::Parse;
                 }
                 ReadMode::Parse => {
-                    if (self.read_buffer.position() as usize)
-                        < self.read_buffer.get_ref().len()
-                    {
-                        return Received::decode(&mut self.read_buffer);
+                    if !self.buffer.finished() {
+                        return Received::decode(&mut self.buffer);
                     }
-                    self.resize_buf(size_of::<DataSize>());
+                    self.buffer.resize(size_of::<DataSize>());
                     self.read_mode = ReadMode::Size;
                 }
-            }
-        }
-    }
-
-    fn resize_buf(&mut self, size: usize) {
-        self.read_buffer.get_mut().resize(size, 0);
-        self.read_buffer.set_position(0);
-        self.read_buffer_actual = 0;
-    }
-
-    fn fill_buf(&mut self) -> Result<()> {
-        let n = self
-            .stream
-            .read(&mut self.read_buffer.get_mut()[self.read_buffer_actual..])?;
-        if n == 0 {
-            Err(Error::from(ErrorKind::UnexpectedEof))
-        } else {
-            self.read_buffer_actual += n;
-            if self.read_buffer_actual == self.read_buffer.get_ref().len() {
-                Ok(())
-            } else {
-                Err(Error::from(ErrorKind::WouldBlock))
             }
         }
     }
