@@ -8,11 +8,29 @@ use crate::Client;
 use common::commands::{ClientCommand, ServerCommand};
 
 #[derive(Debug)]
+struct IdGen {
+    id: u16,
+}
+
+impl IdGen {
+    fn new() -> Self {
+        Self { id: 0 }
+    }
+
+    fn get(&mut self) -> u16 {
+        self.id += 1;
+        self.id
+    }
+}
+
+#[derive(Debug)]
 pub struct Server {
     listener: TcpListener,
     clients: Vec<Client>,
     message_queue: Vec<ServerCommand>,
     pub inactivity: u64,
+    user_id_gen: IdGen,
+    msg_id_gen: IdGen,
 }
 
 impl Server {
@@ -24,6 +42,8 @@ impl Server {
             clients: Vec::default(),
             message_queue: Vec::default(),
             inactivity: 0,
+            user_id_gen: IdGen::new(),
+            msg_id_gen: IdGen::new(),
         };
         info!(
             "Server started with address {}",
@@ -45,16 +65,17 @@ impl Server {
         self.message_queue.extend(
             self.clients
                 .iter_mut()
-                .filter_map(Client::poll)
-                .filter_map(|cc| match cc {
+                .filter_map(|c| c.poll().map(|cc| (c, cc)))
+                .filter_map(|(c, cc)| match cc {
                     ClientCommand::Padding => None,
                     ClientCommand::Connect { name } => {
-                        Some(ServerCommand::AddUser { user_id: 69, name })
+                        let user_id = c.user_id();
+                        Some(ServerCommand::AddUser { user_id, name })
                     }
                     ClientCommand::Message { message } => {
                         Some(ServerCommand::Message {
-                            msg_id: 69,
-                            user_id: 69,
+                            msg_id: self.msg_id_gen.get(),
+                            user_id: c.user_id(),
                             message,
                         })
                     }
@@ -81,8 +102,9 @@ impl Server {
             if c.connected() {
                 true
             } else {
-                self.message_queue
-                    .push(ServerCommand::RemoveUser { user_id: 69 });
+                self.message_queue.push(ServerCommand::RemoveUser {
+                    user_id: c.user_id(),
+                });
                 false
             }
         });
@@ -114,7 +136,8 @@ impl Server {
         match self.listener.accept() {
             Ok((stream, _)) => {
                 self.inactivity = 0;
-                self.clients.push(Client::new(stream)?);
+                self.clients
+                    .push(Client::new(stream, self.user_id_gen.get())?);
                 Ok(true)
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(false),

@@ -11,14 +11,16 @@ pub struct Client {
     addr: SocketAddr,
     connection: Connection<ServerCommand, ClientCommand>,
     connected: bool,
+    user_id: u16,
 }
 
 impl Client {
-    pub fn new(stream: TcpStream) -> Result<Self> {
+    pub fn new(stream: TcpStream, user_id: u16) -> Result<Self> {
         let this = Self {
             addr: stream.peer_addr()?,
             connection: Connection::new(stream)?,
             connected: true,
+            user_id,
         };
         info!("Client connected: {}", this.addr);
         Ok(this)
@@ -86,5 +88,10 @@ impl Client {
     #[must_use]
     pub const fn connected(&self) -> bool {
         self.connected
+    }
+
+    #[must_use]
+    pub const fn user_id(&self) -> u16 {
+        self.user_id
     }
 }
