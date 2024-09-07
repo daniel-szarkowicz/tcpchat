@@ -1,5 +1,6 @@
 use std::io::{stdout, Result, StdoutLock, Write};
 use std::net::TcpStream;
+use std::str::FromStr;
 use std::time::Duration;
 
 use common::commands::{ClientCommand, ServerCommand};
@@ -10,7 +11,7 @@ use crossterm::terminal::{
     self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::{ExecutableCommand, QueueableCommand};
-use log::error;
+use log::{error, info};
 
 use client::channel_logger;
 use client::Server;
@@ -21,11 +22,13 @@ fn main() -> Result<()> {
     let log_receiver = channel_logger::init_and_get_receiver();
     let mut ui = UI::new()?;
     let mut run = true;
-    let mut server = Server::new(TcpStream::connect("localhost:6969")?)?;
+    let mut server = None::<Server>;
 
     while run {
-        while let Some(msg) = server.poll() {
-            ui.add_message(msg);
+        if let Some(server) = &mut server {
+            while let Some(msg) = server.poll() {
+                ui.add_message(msg);
+            }
         }
         while let Ok(log) = log_receiver.try_recv() {
             ui.add_log(log);
@@ -34,14 +37,45 @@ fn main() -> Result<()> {
             match event {
                 UIEvent::Exit => run = false,
                 UIEvent::Message(msg) => {
-                    server.send(&ClientCommand::Message { message: msg });
-                    server.flush();
+                    if let Some(server) = &mut server {
+                        server.send(&ClientCommand::Message { message: msg });
+                        server.flush();
+                    } else {
+                        error!("Server not connected!");
+                        info!(
+                            "Use `/connect <address> <username>` to connect."
+                        );
+                    }
+                }
+                UIEvent::Connect {
+                    server_addr,
+                    user_name,
+                } => {
+                    server = TcpStream::connect(server_addr)
+                        .inspect_err(|e| {
+                            error!("Failed to connect to the server: {e}")
+                        })
+                        .ok()
+                        .and_then(|s| Server::new(s).inspect_err(|e| 
+                            error!("Failed to connect to the server: {e}")
+                        ).ok())
+                        .map(|mut s| {
+                            s.send(&ClientCommand::Connect {
+                                name: user_name,
+                            });
+                            s
+                        })
+                }
+                UIEvent::Disconnect => {
+                    server = None
                 }
             }
         }
         ui.render()?;
-        if !server.connected() {
-            run = false;
+        if let Some(s) = &mut server {
+            if !s.connected() {
+                server = None;
+            }
         }
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -101,6 +135,7 @@ impl UI {
         }
 
         self.stdout.queue(MoveTo(0, self.height - 2))?;
+        self.stdout.queue(SetForegroundColor(Color::Reset))?;
         write!(self.stdout, "{}", "-".repeat(self.width as usize))?;
 
         self.stdout.queue(MoveTo(0, self.height - 1))?;
@@ -119,6 +154,7 @@ impl UI {
                 write!(self.stdout, "{c}")?;
             }
         } else {
+            self.stdout.queue(SetForegroundColor(Color::Reset))?;
             for c in self.typing_buffer.chars() {
                 write!(self.stdout, "{c}")?;
             }
@@ -143,11 +179,11 @@ impl UI {
                 if self.typing_buffer.is_empty() {
                     None
                 } else {
+                    let event = self.typing_buffer.parse().ok()?;
                     self.mark_dirty();
-                    self.typing_buffer.push('\n');
-                    Some(UIEvent::Message(std::mem::take(
-                        &mut self.typing_buffer,
-                    )))
+                    // TODO: add to history
+                    self.typing_buffer.clear();
+                    Some(event)
                 }
             }
             KeyCode::Char(c) => {
@@ -233,4 +269,30 @@ impl Drop for UI {
 enum UIEvent {
     Exit,
     Message(String),
+    Connect {
+        server_addr: String,
+        user_name: String,
+    },
+    Disconnect
+}
+
+impl FromStr for UIEvent {
+    type Err = ();
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        if let Some(rawcommand) = s.strip_prefix("/") {
+            let mut args = rawcommand.split_whitespace();
+            let cmd = args.next().ok_or(())?;
+            match cmd {
+                "connect" => Ok(Self::Connect {
+                    server_addr: args.next().ok_or(())?.to_owned(),
+                    user_name: args.next().ok_or(())?.to_owned(),
+                }),
+                "disconnect" => Ok(Self::Disconnect),
+                _ => Err(()),
+            }
+        } else {
+            Ok(Self::Message(s.to_string()))
+        }
+    }
 }
